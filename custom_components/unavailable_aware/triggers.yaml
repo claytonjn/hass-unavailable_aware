@@ -1,0 +1,106 @@
+state:
+  target:
+  fields:
+    attribute:
+      required: false
+      example: hvac_action
+      selector:
+        text:
+    from:
+      required: false
+      example: "on"
+      selector:
+        text:
+          multiple: true
+    not_from:
+      required: false
+      selector:
+        text:
+          multiple: true
+    to:
+      required: false
+      example: "off"
+      selector:
+        text:
+          multiple: true
+    not_to:
+      required: false
+      selector:
+        text:
+          multiple: true
+    for:
+      required: false
+      example: "00:05:00"
+      selector:
+        duration:
+    bridge_up_to:
+      required: false
+      default:
+        hours: 0
+        minutes: 0
+        seconds: 30
+      selector:
+        duration:
+    bridge_restarts_for_timer:
+      required: false
+      default: false
+      selector:
+        boolean:
+    longer_gaps:
+      required: false
+      default: ignore
+      selector:
+        select:
+          translation_key: longer_gaps
+          options:
+          - ignore
+          - home_assistant_default
+numeric_state:
+  target:
+  fields:
+    attribute:
+      required: false
+      example: current_temperature
+      selector:
+        text:
+    above:
+      required: false
+      example: 0
+      selector:
+        number:
+          mode: box
+          step: any
+    below:
+      required: false
+      example: 1
+      selector:
+        number:
+          mode: box
+          step: any
+    for:
+      required: false
+      example: "00:05:00"
+      selector:
+        duration:
+    bridge_up_to:
+      required: false
+      default:
+        hours: 0
+        minutes: 0
+        seconds: 30
+      selector:
+        duration:
+    bridge_restarts_for_timer:
+      required: false
+      default: false
+      selector:
+        boolean:
+    longer_gaps:
+      required: false
+      default: ignore
+      selector:
+        select:
+          translation_key: longer_gaps
+          options:
+          - ignore
+          - home_assistant_default

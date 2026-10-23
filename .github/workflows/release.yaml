@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  release:
+    name: Build and attach the release zip
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Write the release version into manifest.json
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          manifest="custom_components/unavailable_aware/manifest.json"
+          jq --arg version "${version}" '.version = $version' "${manifest}" > manifest.tmp
+          mv manifest.tmp "${manifest}"
+          cat "${manifest}"
+
+      - name: Zip the integration
+        shell: bash
+        run: |
+          cd custom_components/unavailable_aware
+          zip -r "${GITHUB_WORKSPACE}/unavailable_aware.zip" . -x '__pycache__/*' '*/__pycache__/*'
+
+      - name: Upload the zip to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "${RELEASE_TAG}" unavailable_aware.zip --clobber

@@ -1,0 +1,3 @@
+# Unpinned: tests run against the latest Home Assistant release. CI also runs
+# them against the oldest supported release, read from hacs.json.
+pytest-homeassistant-custom-component

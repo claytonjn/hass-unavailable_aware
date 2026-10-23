@@ -1,0 +1,10 @@
+{
+  "triggers": {
+    "state": {
+      "trigger": "mdi:connection"
+    },
+    "numeric_state": {
+      "trigger": "mdi:numeric"
+    }
+  }
+}

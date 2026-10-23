@@ -1,0 +1,14 @@
+{
+  "domain": "unavailable_aware",
+  "name": "Unavailable-Aware Triggers",
+  "codeowners": ["@claytonjn"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/claytonjn/hass-unavailable_aware",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/claytonjn/hass-unavailable_aware/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.0.0"
+}

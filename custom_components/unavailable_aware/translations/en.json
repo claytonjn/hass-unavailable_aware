@@ -1,0 +1,105 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Unavailable-Aware Triggers",
+        "description": "Adds `unavailable_aware.state` and `unavailable_aware.numeric_state` triggers to the automation editor."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Unavailable-Aware Triggers is already set up."
+    }
+  },
+  "triggers": {
+    "state": {
+      "name": "State (unavailable-aware)",
+      "description": "Triggers when an entity's state or attribute changes, seeing through unavailable, unknown, and removed. Dropping out and coming back unchanged does not fire; a real change while unavailable does.",
+      "fields": {
+        "attribute": {
+          "name": "Attribute",
+          "description": "Trigger on this attribute instead of the state."
+        },
+        "from": {
+          "name": "From",
+          "description": "Only trigger when it changes from one of these values. After a gap, this is the value before the gap."
+        },
+        "not_from": {
+          "name": "Not from",
+          "description": "Only trigger when it changes from a value not in this list. After a gap, this is the value before the gap."
+        },
+        "to": {
+          "name": "To",
+          "description": "Only trigger when it changes to one of these values."
+        },
+        "not_to": {
+          "name": "Not to",
+          "description": "Only trigger when it changes to a value not in this list."
+        },
+        "for": {
+          "name": "For",
+          "description": "Only trigger once the new state has held for this long."
+        },
+        "bridge_up_to": {
+          "name": "Bridge gaps up to",
+          "description": "Gaps up to this long are bridged: coming back unchanged does not fire, and a real change while unavailable is compared to the state before the gap."
+        },
+        "longer_gaps": {
+          "name": "Longer gaps",
+          "description": "What happens when the entity comes back after a gap longer than `Bridge gaps up to`, or with no earlier state to compare against. Ignore is the safe choice: the change may have happened at any point while it was away. Home Assistant default does what Home Assistant's own trigger would, so coming back unchanged after a long gap fires too."
+        },
+        "bridge_restarts_for_timer": {
+          "name": "Bridge restarts For timer",
+          "description": "With `For:`, what a bridged gap does to the timer when the entity comes back unchanged. Off: the gap doesn't interrupt the timer. On: the timer starts over (Home Assistant default behavior)."
+        }
+      }
+    },
+    "numeric_state": {
+      "name": "Numeric state (unavailable-aware)",
+      "description": "Triggers when a value enters a range, seeing through unavailable, unknown, and removed. Whether the value was already in range is determined from the state before a gap.",
+      "fields": {
+        "attribute": {
+          "name": "Attribute",
+          "description": "Trigger on this attribute instead of the state."
+        },
+        "above": {
+          "name": "Above",
+          "description": "Trigger when the value rises above this."
+        },
+        "below": {
+          "name": "Below",
+          "description": "Trigger when the value drops below this."
+        },
+        "for": {
+          "name": "For",
+          "description": "Only trigger once the new state has held for this long."
+        },
+        "bridge_up_to": {
+          "name": "Bridge gaps up to",
+          "description": "Gaps up to this long are bridged: coming back unchanged does not fire, and a real change while unavailable is compared to the state before the gap."
+        },
+        "longer_gaps": {
+          "name": "Longer gaps",
+          "description": "What happens when the entity comes back after a gap longer than `Bridge gaps up to`, or with no earlier state to compare against. Ignore is the safe choice: the change may have happened at any point while it was away. Home Assistant default does what Home Assistant's own trigger would, so coming back unchanged after a long gap fires too."
+        },
+        "bridge_restarts_for_timer": {
+          "name": "Bridge restarts For timer",
+          "description": "With `For:`, what a bridged gap does to the timer when the entity comes back unchanged. Off: the gap doesn't interrupt the timer. On: the timer starts over (Home Assistant default behavior)."
+        }
+      }
+    }
+  },
+  "selector": {
+    "longer_gaps": {
+      "options": {
+        "ignore": "Ignore: don't fire",
+        "home_assistant_default": "Home Assistant default: fire as Home Assistant's built-in trigger would, treating the change as coming from unavailable or unknown"
+      }
+    }
+  },
+  "issues": {
+    "not_set_up": {
+      "title": "Unavailable-Aware Triggers isn't set up",
+      "description": "These automations and scripts use Unavailable-Aware Triggers, so they can't run their triggers while the integration isn't set up:\n\n{dependents}\n\nAdd the integration back under **Settings > Devices & services**, or remove these triggers to finish uninstalling it."
+    }
+  }
+}

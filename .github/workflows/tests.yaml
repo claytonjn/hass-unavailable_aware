@@ -1,0 +1,50 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  pytest:
+    name: Pytest (${{ matrix.home-assistant }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # minimum: the oldest supported release, read from hacs.json.
+        # latest: whatever Home Assistant released last.
+        home-assistant: [minimum, latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install the test harness
+        env:
+          HOME_ASSISTANT: ${{ matrix.home-assistant }}
+        run: |
+          if [ "${HOME_ASSISTANT}" = minimum ]; then
+            # pip picks the harness release that pins this Home Assistant version.
+            pip install -r requirements_test.txt "homeassistant==$(jq -r .homeassistant hacs.json)"
+          else
+            pip install -r requirements_test.txt
+          fi
+          python -c "import homeassistant.const as c; print('Home Assistant', c.__version__)"
+      - run: python -m pytest -q
