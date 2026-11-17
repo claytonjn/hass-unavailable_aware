@@ -133,6 +133,10 @@ class StateTrigger(GapAwareTrigger):
         return bool(self.value(state) == hold)
 
     @override
+    def holds_saved(self, hold: Any, state: State) -> bool:
+        return values_equal(hold, self.value(state), restored=True)
+
+    @override
     def native_would_fire(
         self, old: State | None, new: State | None, *, last_seen: State | None = None
     ) -> bool:

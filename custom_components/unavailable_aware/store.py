@@ -3,6 +3,8 @@
 When an entity comes back from a gap, Home Assistant reports its old state as
 `unavailable`, `unknown`, or nothing at all, so the state from before the gap
 is lost. This store keeps it, and saves it to disk so it survives a restart.
+It also saves the triggers' pending `for` waits, so a wait that was running
+when Home Assistant stopped can start over once the entity is back.
 
 The store records every state change of a watched entity, works out what the
 change means (an ordinary change, the start of a gap, or the end of one), and
@@ -11,7 +13,7 @@ passes it to the triggers that use that entity.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -26,6 +28,7 @@ from homeassistant.const import (
 from homeassistant.core import (
     CALLBACK_TYPE,
     Context,
+    CoreState,
     Event,
     EventStateChangedData,
     HomeAssistant,
@@ -43,6 +46,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.hass_dict import HassKey
 
 from .const import (
+    RESTART_RETURN_WINDOW,
     RETENTION,
     SAVE_DELAY,
     STARTUP_RETENTION,
@@ -99,6 +103,13 @@ class Change:
     gap: Gap | None = None
     # The previous state came from before a restart, read back from disk.
     restored: bool = False
+    # False when no state change happened: the end of a restart gap for an
+    # entity that was already back when its trigger subscribed. Home
+    # Assistant's own trigger saw nothing then.
+    observed: bool = True
+    # At the end of a restart gap: the `for` waits that were pending before
+    # the restart, by trigger fingerprint.
+    waits: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 def gap_kind(state: State | None) -> GapKind | None:
@@ -126,6 +137,22 @@ class _Entry:
     dormant: bool = False
     subscribers: list[Subscriber] = field(default_factory=list)
     release: CALLBACK_TYPE | None = None
+    # Pending `for` waits by trigger fingerprint, saved so that they can start
+    # over after a restart. Triggers with the same options decide the same
+    # way, so they share one record.
+    waits: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # The triggers holding each wait. Not saved: after a restart, waits read
+    # from disk have no holders until a trigger starts its wait over.
+    wait_holders: dict[str, set[int]] = field(default_factory=dict)
+    # During startup, the end of the restart gap for an entity that was already
+    # back when its first trigger subscribed. Every trigger that subscribes
+    # until `RESTART_RETURN_WINDOW` after startup receives it, unless the
+    # entity changes or a trigger using it detaches (an automation reload)
+    # first.
+    restart_return: Change | None = None
+    # Changes queued for a subscriber, delivered in order before anything else
+    # reaches it.
+    pending: list[tuple[Subscriber, Change]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Return the entry as it is written to disk."""
@@ -136,7 +163,19 @@ class _Entry:
             "gap_started": (
                 None if self.gap_started is None else self.gap_started.isoformat()
             ),
+            "waits": self.waits,
         }
+
+    def take_restored_waits(self) -> dict[str, dict[str, Any]]:
+        """Remove and return the waits read from disk that no trigger holds."""
+        taken = {
+            key: data
+            for key, data in self.waits.items()
+            if not self.wait_holders.get(key)
+        }
+        for key in taken:
+            del self.waits[key]
+        return taken
 
     def as_diagnostics(self) -> dict[str, Any]:
         """Return the entry for diagnostics."""
@@ -176,6 +215,11 @@ class AwareStore:
         self._save_pending = False
         self._unsubs: list[CALLBACK_TYPE] = []
         self._unsub_stop: CALLBACK_TYPE | None = None
+        # Until shortly after startup, an entity that is already back when a
+        # trigger subscribes is compared with its state from before the
+        # restart. Only when the store was loaded during startup: loading it
+        # later (adding or reloading the integration) is not a restart.
+        self._restart_returns_open = hass.state is not CoreState.running
 
     async def async_load(self) -> None:
         """Load the store from disk once."""
@@ -211,7 +255,7 @@ class AwareStore:
                 er.EVENT_ENTITY_REGISTRY_UPDATED, self._registry_updated
             )
         )
-        self._unsubs.append(async_at_started(self._hass, self._schedule_startup_purge))
+        self._unsubs.append(async_at_started(self._hass, self._startup_done))
 
     @staticmethod
     def _entry_from_disk(
@@ -232,6 +276,9 @@ class AwareStore:
         ) or saved_at
         if started is None:
             return None
+        waits = raw.get("waits")
+        if not isinstance(waits, dict):
+            waits = {}
         return _Entry(
             entity_id=raw["entity_id"],
             previous=previous,
@@ -239,11 +286,29 @@ class AwareStore:
             gap_started=started,
             restored=previous is not None,
             dormant=True,
+            waits={
+                str(key): data for key, data in waits.items() if isinstance(data, dict)
+            },
         )
 
     @callback
-    def _schedule_startup_purge(self, _hass: HomeAssistant) -> None:
-        """Shortly after startup, drop entities not used in any aware triggers."""
+    def _startup_done(self, _hass: HomeAssistant) -> None:
+        """Schedule the end of restart returns, and the purge.
+
+        Shortly after startup, the store stops comparing entities that are
+        already back with their state from before the restart, and drops
+        entities not used in any aware triggers.
+        """
+
+        @callback
+        def close_restart_returns(_now: datetime) -> None:
+            self._restart_returns_open = False
+            for entry in self._entries.values():
+                entry.restart_return = None
+
+        self._unsubs.append(
+            async_call_later(self._hass, RESTART_RETURN_WINDOW, close_restart_returns)
+        )
 
         @callback
         def purge(_now: datetime) -> None:
@@ -300,15 +365,61 @@ class AwareStore:
         """
         entry = self._track(entity_id)
         entry.subscribers.append(subscriber)
+        if entry.restart_return is not None:
+            entry.pending.append((subscriber, entry.restart_return))
+            self._hass.loop.call_soon(self._deliver_pending, entry)
 
         @callback
         def unsubscribe() -> None:
             if subscriber in entry.subscribers:
                 entry.subscribers.remove(subscriber)
+            entry.pending = [item for item in entry.pending if item[0] != subscriber]
+            # A trigger subscribing again after this (an automation reload)
+            # has already had its chance to compare.
+            entry.restart_return = None
             if not entry.subscribers and self._entries.get(entity_id) is entry:
                 self._start_release(entity_id, entry)
 
         return unsubscribe
+
+    @callback
+    def _deliver_pending(self, entry: _Entry) -> None:
+        """Pass on the queued changes for an entity, oldest first."""
+        while entry.pending:
+            subscriber, change = entry.pending.pop(0)
+            if self._frozen or subscriber not in entry.subscribers:
+                continue
+            try:
+                subscriber(change)
+            except Exception:
+                _LOGGER.exception("Error handling a change of %s", entry.entity_id)
+
+    # `for` waits
+
+    @callback
+    def async_set_wait(
+        self, entity_id: str, key: str, holder: object, data: dict[str, Any]
+    ) -> None:
+        """Record a trigger's pending `for` wait, so it survives a restart."""
+        if self._frozen or (entry := self._entries.get(entity_id)) is None:
+            return
+        entry.waits[key] = data
+        entry.wait_holders.setdefault(key, set()).add(id(holder))
+        self._schedule_save()
+
+    @callback
+    def async_clear_wait(self, entity_id: str, key: str, holder: object) -> None:
+        """Forget a trigger's `for` wait once it has fired or ended."""
+        if self._frozen or (entry := self._entries.get(entity_id)) is None:
+            return
+        holders = entry.wait_holders.get(key)
+        if holders is None or id(holder) not in holders:
+            return
+        holders.discard(id(holder))
+        if not holders:
+            del entry.wait_holders[key]
+            entry.waits.pop(key, None)
+            self._schedule_save()
 
     @callback
     def _track(self, entity_id: str) -> _Entry:
@@ -339,16 +450,48 @@ class AwareStore:
         elif entry.dormant:
             entry.dormant = False
             if kind is None:
-                # The entity came back before any trigger used it, so there's no
-                # gap left to bridge. Start from its current state.
+                assert current is not None
+                if self._restart_returns_open and entry.restored:
+                    # Back before any trigger subscribed, around startup: the
+                    # restart gap ends now, for every trigger that subscribes
+                    # while restart returns are open.
+                    entry.restart_return = self._restart_return(entry, current)
+                # Otherwise there's no gap left to bridge. Either way, the
+                # entity carries on from its current state.
                 entry.previous = current
                 entry.gap_kind = None
                 entry.gap_started = None
                 entry.restored = False
+                entry.waits.clear()
 
         self._listen(entity_id)
         self._schedule_save()
         return entry
+
+    @staticmethod
+    def _restart_return(entry: _Entry, current: State) -> Change:
+        """Return the end of a restart gap for an entity that is already back.
+
+        The gap ends when the entity got its current state, if that was during
+        the restart, and otherwise now.
+        """
+        assert entry.gap_started is not None
+        now = dt_util.utcnow()
+        ended = current.last_changed
+        if not entry.gap_started <= ended <= now:
+            ended = now
+        return Change(
+            entity_id=entry.entity_id,
+            phase=Phase.GAP_END,
+            old_state=None,
+            new_state=current,
+            context=current.context,
+            previous=entry.previous,
+            gap=Gap(kind=GapKind.RESTART, started=entry.gap_started, ended=ended),
+            restored=True,
+            observed=False,
+            waits=entry.take_restored_waits(),
+        )
 
     @callback
     def _start_release(self, entity_id: str, entry: _Entry) -> None:
@@ -385,6 +528,9 @@ class AwareStore:
         entity_id = event.data["entity_id"]
         if (entry := self._entries.get(entity_id)) is None or entry.dormant:
             return
+        # Anything queued for a subscriber happened before this change.
+        self._deliver_pending(entry)
+        entry.restart_return = None
         change = self._process(entry, event)
         if change.phase is not Phase.IN_GAP:
             self._schedule_save()
@@ -430,11 +576,12 @@ class AwareStore:
         previous = entry.previous
         restored = entry.restored
 
+        waits = entry.take_restored_waits() if restored else {}
         entry.previous = new
         entry.gap_kind = None
         entry.gap_started = None
         entry.restored = False
-        return change(Phase.GAP_END, previous, gap=gap, restored=restored)
+        return change(Phase.GAP_END, previous, gap=gap, restored=restored, waits=waits)
 
     @callback
     def _registry_updated(
@@ -453,7 +600,10 @@ class AwareStore:
         else:
             return
         entry = self._entries.get(gone)
-        if entry is not None and entry.previous is not None:
+        if entry is None:
+            return
+        entry.restart_return = None
+        if entry.previous is not None or entry.take_restored_waits():
             entry.previous = None
             entry.restored = False
             self._schedule_save()

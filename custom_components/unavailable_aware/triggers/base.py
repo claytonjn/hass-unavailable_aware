@@ -11,6 +11,7 @@ from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import hashlib
 import json
 from typing import Any, ClassVar, cast, override
 
@@ -29,6 +30,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.json import json_dumps
 from homeassistant.helpers.target import TargetEntityChangeTracker, TargetSelection
+from homeassistant.helpers.template import Template
 from homeassistant.helpers.trigger import (
     NotTriggeredInfo,
     Trigger,
@@ -99,6 +101,32 @@ def _normalized(value: Any) -> Any:
         return value
 
 
+def _plain(value: Any) -> Any:
+    """Return an option value as plain JSON data, for a fingerprint."""
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, Template):
+        return value.template
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+def fingerprint(kind: str, options: dict[str, Any]) -> str:
+    """Return a key that is the same for triggers with the same options.
+
+    Pending `for` waits are saved under it, so a trigger finds its wait again
+    after a restart. Triggers with the same options decide the same way, so
+    sharing a key is harmless.
+    """
+    data = json.dumps(
+        {"trigger": kind, "options": _plain(options)}, sort_keys=True, default=str
+    )
+    return hashlib.sha256(data.encode()).hexdigest()[:16]
+
+
 @dataclass(slots=True, kw_only=True)
 class _Waiting:
     """A change that matches and now has to hold for `for`."""
@@ -111,6 +139,9 @@ class _Waiting:
     away: bool = False
     # `for` ran out while away: fire on return, if it held.
     due: bool = False
+    # Read back from disk after a restart. It has no timer, so it starts over
+    # if the entity comes back still holding.
+    restored: bool = False
 
     def cancel(self) -> None:
         """Stop the timer."""
@@ -119,20 +150,15 @@ class _Waiting:
             self.timer = None
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class _Followed:
     """What an `_AttachedTrigger` keeps for each entity its trigger is watching."""
 
+    entity_id: str
     waiting: _Waiting | None = None
     unsubscribe: CALLBACK_TYPE | None = None
     # Home Assistant's own trigger would have fired going into the gap.
     entered_suppressed: bool = False
-
-    def cancel(self) -> None:
-        """Drop everything pending."""
-        if self.waiting is not None:
-            self.waiting.cancel()
-            self.waiting = None
 
 
 class _Targets(TargetEntityChangeTracker):
@@ -220,6 +246,7 @@ class GapAwareTrigger(Trigger):
         self.bridge_restarts_for_timer: bool = self._options.get(
             CONF_BRIDGE_RESTARTS_FOR_TIMER, False
         )
+        self.fingerprint = fingerprint(self.description_prefix, self._options)
 
     # What a subclass decides
 
@@ -239,6 +266,14 @@ class GapAwareTrigger(Trigger):
     @abstractmethod
     def holds(self, hold: Any, state: State) -> bool:
         """Return whether a state still holds what `for` is waiting on."""
+
+    def holds_saved(self, hold: Any, state: State) -> bool:
+        """Return whether a state holds a wait's hold as it was saved to disk.
+
+        After a restart the hold has been through JSON, so a tuple comes back
+        as a list. Override where that matters.
+        """
+        return self.holds(hold, state)
 
     @abstractmethod
     def native_would_fire(
@@ -326,7 +361,7 @@ class _AttachedTrigger:
         if self._store is None:
             return
         for entity_id in entity_ids - set(self._followed):
-            followed = self._followed[entity_id] = _Followed()
+            followed = self._followed[entity_id] = _Followed(entity_id=entity_id)
             followed.unsubscribe = self._store.async_subscribe(
                 entity_id, self._on_change
             )
@@ -349,9 +384,61 @@ class _AttachedTrigger:
 
     def _drop(self, entity_id: str) -> None:
         followed = self._followed.pop(entity_id)
-        followed.cancel()
+        self._end_waiting(followed)
         if followed.unsubscribe is not None:
             followed.unsubscribe()
+
+    # Waits
+
+    def _start_waiting(self, followed: _Followed, waiting: _Waiting) -> None:
+        """Make a wait the pending one, and save it in case of a restart."""
+        if followed.waiting is not None:
+            followed.waiting.cancel()
+        followed.waiting = waiting
+        if self._store is not None:
+            from_state: State | None = waiting.payload["from_state"]
+            self._store.async_set_wait(
+                followed.entity_id,
+                self._trigger.fingerprint,
+                self,
+                {
+                    "from_state": None if from_state is None else from_state.as_dict(),
+                    "hold": _normalized(waiting.hold),
+                },
+            )
+
+    def _end_waiting(self, followed: _Followed) -> None:
+        """Drop the pending wait, if any, and its saved copy."""
+        if (waiting := followed.waiting) is None:
+            return
+        waiting.cancel()
+        followed.waiting = None
+        if self._store is not None and not waiting.restored:
+            self._store.async_clear_wait(
+                followed.entity_id, self._trigger.fingerprint, self
+            )
+
+    def _holds(self, waiting: _Waiting, new: State) -> bool:
+        """Return whether a state still holds what a wait is waiting on."""
+        if waiting.restored:
+            return self._trigger.holds_saved(waiting.hold, new)
+        return self._trigger.holds(waiting.hold, new)
+
+    def _restore_wait(self, followed: _Followed, change: Change) -> None:
+        """Take back the wait this trigger had pending before a restart."""
+        if followed.waiting is not None:
+            return
+        if (saved := change.waits.get(self._trigger.fingerprint)) is None:
+            return
+        raw_from = saved.get("from_state")
+        from_state = State.from_dict(raw_from) if isinstance(raw_from, dict) else None
+        followed.waiting = _Waiting(
+            hold=saved.get("hold"),
+            payload={"from_state": from_state},
+            context=None,
+            away=True,
+            restored=True,
+        )
 
     @callback
     def detach(self) -> None:
@@ -374,6 +461,8 @@ class _AttachedTrigger:
                 self._gap_started(followed, change)
             case Phase.GAP_END:
                 assert change.gap is not None and change.new_state is not None
+                if change.waits:
+                    self._restore_wait(followed, change)
                 self._gap_ended(
                     followed,
                     previous=change.previous,
@@ -382,6 +471,7 @@ class _AttachedTrigger:
                     context=change.context,
                     raw_old=change.old_state,
                     restored=change.restored,
+                    observed=change.observed,
                 )
             case Phase.IN_GAP:
                 pass
@@ -390,11 +480,8 @@ class _AttachedTrigger:
         trigger = self._trigger
         new = change.new_state
         assert new is not None
-        if (waiting := followed.waiting) is not None and not trigger.holds(
-            waiting.hold, new
-        ):
-            waiting.cancel()
-            followed.waiting = None
+        if (waiting := followed.waiting) is not None and not self._holds(waiting, new):
+            self._end_waiting(followed)
 
         if trigger.qualifies(change.previous, new, across_gap=False, restored=False):
             self._qualified(
@@ -436,7 +523,14 @@ class _AttachedTrigger:
         context: Context | None,
         raw_old: State | None,
         restored: bool,
+        observed: bool,
     ) -> None:
+        """Handle an entity coming back from a gap.
+
+        `observed` is False when no state change happened (the entity was
+        already back when the trigger subscribed after a restart), so Home
+        Assistant's own trigger would not have fired.
+        """
         trigger = self._trigger
         gap_vars = _gap_variables(gap)
         entered_suppressed = followed.entered_suppressed
@@ -459,6 +553,7 @@ class _AttachedTrigger:
                 raw_old=raw_old,
                 last_seen=last_seen,
                 gap_vars=gap_vars,
+                observed=observed,
             )
         elif cannot_bridge and self._restart_wait(
             followed, new=new, context=context, raw_old=raw_old, gap_vars=gap_vars
@@ -473,6 +568,7 @@ class _AttachedTrigger:
                 raw_old=raw_old,
                 last_seen=last_seen,
                 restored=restored,
+                observed=observed,
             )
         else:
             assert previous is not None  # cannot_bridge is set whenever it's None
@@ -485,6 +581,7 @@ class _AttachedTrigger:
                 last_seen=last_seen,
                 restored=restored,
                 gap_vars=gap_vars,
+                observed=observed,
             )
 
         if reason == _HANDLED:
@@ -525,9 +622,8 @@ class _AttachedTrigger:
         waiting = followed.waiting
         if waiting is None:
             return False
-        waiting.cancel()
-        followed.waiting = None
-        if not self._trigger.holds(waiting.hold, new):
+        self._end_waiting(followed)
+        if not self._holds(waiting, new):
             return False
         self._qualified(
             followed,
@@ -548,6 +644,7 @@ class _AttachedTrigger:
         raw_old: State | None,
         last_seen: State | None,
         gap_vars: dict[str, Any],
+        observed: bool,
     ) -> str | None:
         """Judge a return the way Home Assistant's own trigger does.
 
@@ -556,10 +653,11 @@ class _AttachedTrigger:
         wait ended with the gap, and a new one starts when the entity comes
         back, if the change from the raw state qualifies.
         """
-        if followed.waiting is not None:
-            followed.waiting.cancel()
-            followed.waiting = None
-        if not self._trigger.native_would_fire(raw_old, new, last_seen=last_seen):
+        self._end_waiting(followed)
+        if not (
+            observed
+            and self._trigger.native_would_fire(raw_old, new, last_seen=last_seen)
+        ):
             return None
         self._qualified(
             followed,
@@ -581,6 +679,7 @@ class _AttachedTrigger:
         raw_old: State | None,
         last_seen: State | None,
         restored: bool,
+        observed: bool,
     ) -> str | None:
         """Do nothing for an entity coming back that cannot be compared.
 
@@ -591,7 +690,9 @@ class _AttachedTrigger:
         if (
             previous is not None
             and trigger.qualifies(previous, new, across_gap=True, restored=restored)
-        ) or trigger.native_would_fire(raw_old, new, last_seen=last_seen):
+        ) or (
+            observed and trigger.native_would_fire(raw_old, new, last_seen=last_seen)
+        ):
             return reason
         return None
 
@@ -606,6 +707,7 @@ class _AttachedTrigger:
         last_seen: State | None,
         restored: bool,
         gap_vars: dict[str, Any],
+        observed: bool,
     ) -> str | None:
         """Compare a return with the state before the gap.
 
@@ -616,16 +718,16 @@ class _AttachedTrigger:
         trigger = self._trigger
         if (waiting := followed.waiting) is not None:
             waiting.away = False
-            if trigger.holds(waiting.hold, new):
-                if not trigger.bridge_restarts_for_timer:
+            if self._holds(waiting, new):
+                if not (trigger.bridge_restarts_for_timer or waiting.restored):
                     # Held right through the gap.
                     if waiting.due:
-                        followed.waiting = None
+                        self._end_waiting(followed)
                         self._fire(waiting.payload, waiting.context)
                     return _HANDLED
-                # Back as it was: the wait starts over from now.
-                waiting.cancel()
-                followed.waiting = None
+                # Back as it was: the wait starts over from now. A wait from
+                # before a restart always does, since its timer is gone.
+                self._end_waiting(followed)
                 self._qualified(
                     followed,
                     previous=waiting.payload["from_state"],
@@ -635,8 +737,7 @@ class _AttachedTrigger:
                     gap=gap_vars,
                 )
                 return _HANDLED
-            waiting.cancel()
-            followed.waiting = None
+            self._end_waiting(followed)
 
         if trigger.qualifies(previous, new, across_gap=True, restored=restored):
             self._qualified(
@@ -648,7 +749,7 @@ class _AttachedTrigger:
                 gap=gap_vars,
             )
             return _HANDLED
-        if trigger.native_would_fire(raw_old, new, last_seen=last_seen):
+        if observed and trigger.native_would_fire(raw_old, new, last_seen=last_seen):
             return REASON_BRIDGED_GAP
         return None
 
@@ -679,11 +780,10 @@ class _AttachedTrigger:
             self._fire(payload, context)
             return
 
-        if followed.waiting is not None:
-            followed.waiting.cancel()
-        waiting = followed.waiting = _Waiting(
+        waiting = _Waiting(
             hold=trigger.hold_value(new), payload=payload, context=context
         )
+        self._start_waiting(followed, waiting)
 
         @callback
         def held(_now: datetime) -> None:
@@ -693,7 +793,7 @@ class _AttachedTrigger:
             if waiting.away:
                 waiting.due = True
                 return
-            followed.waiting = None
+            self._end_waiting(followed)
             self._fire(waiting.payload, waiting.context)
 
         waiting.timer = async_call_later(self._hass, trigger.duration, held)

@@ -116,6 +116,18 @@ What a gap does to a running `for:` timer:
 | from a longer gap, with `longer_gaps: ignore`, still matching | Starts over. "Still matching" is judged against the state before the gap, never `unavailable`. The change that started the timer was seen before the gap, and the trigger only fires once the whole `for:` has been seen after it, so nothing is assumed about the gap. To keep timers running through longer gaps, raise `bridge_up_to`. |
 | from a longer gap, with `longer_gaps: ignore`, not matching | Ends. |
 | from a longer gap, with `longer_gaps: home_assistant_default` | As in Home Assistant: the timer ends, and coming back is judged as a change from `unavailable`, which may start a new timer. |
+| after a Home Assistant restart, still matching | Starts over in full, with any `bridge_up_to` or `longer_gaps: ignore`. The timer couldn't run while Home Assistant was stopped. With `longer_gaps: home_assistant_default`, it ends, as in Home Assistant. |
+| after a Home Assistant restart, not matching | Ends. |
+
+#### Restarts
+
+A Home Assistant restart is a gap like any other, measured from when the integration last saved the entity's state before shutdown until the entity is back. With the default `bridge_up_to` of 30 seconds, a restart is longer than that and is ignored. To catch changes that happened while Home Assistant was down, raise `bridge_up_to` past how long your restarts take; a battery low alert, say, is still useful hours late.
+
+Most entities already have their state by the time Home Assistant arms automations at startup. Those are compared with their saved state when each trigger first subscribes, up to a minute after startup, so every automation using the entity gets the comparison. Within that minute, the comparison ends early if the entity changes or an automation using it is reloaded, so nothing is compared twice. Entities that are still unavailable at startup are compared when they come back.
+
+When an entity was already back, Home Assistant's own trigger saw no change, so `trigger.raw_from_state` is `None` and `longer_gaps: home_assistant_default` doesn't fire. The trace only shows a **not triggered** entry (`longer_gap_ignored`) when the entity changed in a way that would have fired had the restart been bridged.
+
+Pending `for:` timers are saved with the entity's state, under a key made from the trigger's options. A trigger finds its timer again after a restart only if its options are unchanged.
 
 #### Choosing `bridge_up_to` and `longer_gaps`
 
@@ -170,6 +182,6 @@ Keep Home Assistant's own triggers when you explicitly want to trigger on a reco
 
 ## How it works
 
-The integration remembers the last valid state of each entity its triggers use, and keeps it through automation reloads and Home Assistant restarts. If Home Assistant crashes, the last few seconds of changes may not be saved; at worst, an automation runs when it didn't need to.
+The integration remembers the last valid state of each entity its triggers use, and any `for:` timers they have pending, and keeps them through automation reloads and Home Assistant restarts. If Home Assistant crashes, the last few seconds of changes may not be saved; at worst, an automation runs when it didn't need to, or a `for:` timer started just before the crash is lost.
 
 To see what's remembered, download the integration's diagnostics.

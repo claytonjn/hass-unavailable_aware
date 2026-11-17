@@ -28,6 +28,12 @@ RETENTION: Final = timedelta(minutes=5)
 # it before it's dropped.
 STARTUP_RETENTION: Final = timedelta(minutes=15)
 
+# How long after startup a trigger subscribing to an entity that is already
+# back still compares it with its state from before the restart. Depending
+# on the release, Home Assistant arms automations just before startup
+# finishes (2026.10) or just after (2026.7); this covers both.
+RESTART_RETURN_WINDOW: Final = timedelta(minutes=1)
+
 STORAGE_KEY: Final = DOMAIN
 STORAGE_VERSION: Final = 1
 SAVE_DELAY: Final = 10  # seconds
