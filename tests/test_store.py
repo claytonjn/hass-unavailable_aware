@@ -220,7 +220,11 @@ async def remove_door(hass: HomeAssistant) -> None:
 async def test_restart_already_back_when_attaching(
     hass: HomeAssistant, hass_storage: dict[str, Any]
 ) -> None:
-    """If the entity is back before a trigger attaches, its current state is used."""
+    """With the integration loaded after startup, an entity that is back starts fresh.
+
+    Adding or reloading the integration while Home Assistant runs isn't a
+    restart, so the saved state isn't compared.
+    """
     hass_storage[STORAGE_KEY] = _stored(DOOR, "on")
     await set_state(hass, DOOR, "off")
     rec = await attach(hass, "state", DOOR, to="off", bridge_up_to={"minutes": 10})
