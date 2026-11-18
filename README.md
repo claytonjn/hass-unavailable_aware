@@ -121,7 +121,7 @@ What a gap does to a running `for:` timer:
 
 #### Restarts
 
-A Home Assistant restart is a gap like any other, measured from when the integration last saved the entity's state before shutdown until the entity is back. With the default `bridge_up_to` of 30 seconds, a restart is longer than that and is ignored. To catch changes that happened while Home Assistant was down, raise `bridge_up_to` past how long your restarts take; a battery low alert, say, is still useful hours late.
+A Home Assistant restart is a gap like any other, measured from when the integration last saved the entity's state before shutdown until the entity is back, so `bridge_up_to` decides as usual: a restart that finishes within it is bridged, and a longer one is ignored. How long a restart takes depends on the instance. To catch changes that happened while Home Assistant was down, raise `bridge_up_to` past how long your restarts take; a battery low alert, for example, is still useful hours late.
 
 Most entities already have their state by the time Home Assistant arms automations at startup. Those are compared with their saved state when each trigger first subscribes, up to a minute after startup, so every automation using the entity gets the comparison. Within that minute, the comparison ends early if the entity changes or an automation using it is reloaded, so nothing is compared twice. Entities that are still unavailable at startup are compared when they come back.
 

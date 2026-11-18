@@ -139,7 +139,7 @@ async def test_back_before_subscribing_unchanged(
 async def test_back_before_subscribing_longer_than_bridge_up_to(
     hass: HomeAssistant, hass_storage: dict[str, Any]
 ) -> None:
-    """With the default `bridge_up_to`, a restart is ignored and the trace says so."""
+    """A restart longer than `bridge_up_to` is ignored, and the trace says so."""
     _starting(hass)
     hass_storage[STORAGE_KEY] = _saved(BATTERY, "25")
     await set_state(hass, BATTERY, "15")
@@ -149,6 +149,22 @@ async def test_back_before_subscribing_longer_than_bridge_up_to(
     assert rec.fired == []
     assert rec.reasons == ["longer_gap_ignored"]
     assert rec.reports[0].data["raw_from"] is None
+    rec.detach()
+
+
+async def test_back_before_subscribing_quick_restart(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    """A restart within the default `bridge_up_to` is bridged."""
+    _starting(hass)
+    hass_storage[STORAGE_KEY] = _saved(BATTERY, "25", saved_ago=timedelta(seconds=10))
+    await set_state(hass, BATTERY, "15")
+    rec = await attach(hass, "numeric_state", BATTERY, below=20)
+    await hass.async_block_till_done()
+
+    assert len(rec.fired) == 1
+    assert rec.fired[0].from_value == "25"
+    assert rec.fired[0].payload["gap"]["kind"] == "restart"
     rec.detach()
 
 
